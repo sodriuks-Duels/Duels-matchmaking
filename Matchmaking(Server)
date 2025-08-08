@@ -1,0 +1,171 @@
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local MessagingService = game:GetService("MessagingService")
+local TeleportService = game:GetService("TeleportService")
+
+local MatchmakingRequest = ReplicatedStorage:WaitForChild("MatchmakingRequest")
+local CancelMatchmakingRequest = ReplicatedStorage:WaitForChild("CancelMatchmakingRequest")
+
+local PlaceId = game.PlaceId
+
+local QueueByMode = {
+	["1v1"] = {},
+	["2v2"] = {},
+	["3v3"] = {}
+}
+
+local modeSizes = {
+	["1v1"] = 2,
+	["2v2"] = 4,
+	["3v3"] = 6,
+}
+
+-- Track players who requested matchmaking locally
+local localQueuedPlayers = {}
+
+-- Topic to send and receive queue updates between servers
+local topic = "MatchmakingQueueUpdate"
+
+-- Adds a player to local queue and broadcasts update
+local function addPlayerToQueue(player, mode)
+	if not QueueByMode[mode] then return end
+
+	-- Prevent duplicates
+	if localQueuedPlayers[player.UserId] then
+		-- already queued
+		return
+	end
+
+	table.insert(QueueByMode[mode], player.UserId)
+	localQueuedPlayers[player.UserId] = mode
+
+	-- Broadcast update to all servers
+	MessagingService:PublishAsync(topic, {
+		action = "add",
+		userId = player.UserId,
+		mode = mode,
+	})
+end
+
+-- Removes a player locally and broadcasts update
+local function removePlayerFromQueue(userId)
+	local mode = localQueuedPlayers[userId]
+	if not mode then return end
+
+	-- Remove from mode queue
+	local queue = QueueByMode[mode]
+	for i = #queue, 1, -1 do
+		if queue[i] == userId then
+			table.remove(queue, i)
+			break
+		end
+	end
+
+	localQueuedPlayers[userId] = nil
+
+	-- Broadcast removal
+	MessagingService:PublishAsync(topic, {
+		action = "remove",
+		userId = userId,
+		mode = mode,
+	})
+end
+
+-- Attempt to form matches when enough players globally queued
+-- (For demo, only local queues are considered here; ideally aggregate global data)
+local function tryMatchmaking(mode)
+	local queue = QueueByMode[mode]
+	local requiredSize = modeSizes[mode]
+
+	if #queue >= requiredSize then
+		-- Remove players from queue
+		local playersForMatch = {}
+		for i = 1, requiredSize do
+			table.insert(playersForMatch, queue[i])
+		end
+		for i = requiredSize, 1, -1 do
+			table.remove(queue, i)
+		end
+
+		-- Notify removal for all match players
+		for _, userId in ipairs(playersForMatch) do
+			localQueuedPlayers[userId] = nil
+			MessagingService:PublishAsync(topic, {
+				action = "remove",
+				userId = userId,
+				mode = mode,
+			})
+		end
+
+		-- Reserve private server
+		local reservedServerCode = TeleportService:ReserveServer(PlaceId)
+
+		-- Create player list for teleport
+		local playersForTeleport = {}
+
+		for _, userId in ipairs(playersForMatch) do
+			local player = Players:GetPlayerByUserId(userId)
+			if player then
+				table.insert(playersForTeleport, player)
+			end
+		end
+
+		-- Teleport grouped players to reserved server
+		for _, player in ipairs(playersForTeleport) do
+			TeleportService:TeleportToPrivateServer(PlaceId, reservedServerCode, {player})
+		end
+
+		print("Match created for mode", mode)
+	end
+end
+
+-- Handle incoming messages from other servers
+MessagingService:SubscribeAsync(topic, function(message)
+	local data = message.Data
+	if data.action == "add" then
+		-- Add userId to queues remotely
+		local mode = data.mode
+		local userId = data.userId
+
+		-- Avoid adding users already local queued
+		if not localQueuedPlayers[userId] then
+			table.insert(QueueByMode[mode], userId)
+		end
+	elseif data.action == "remove" then
+		-- Remove userId from queue remotely
+		local mode = data.mode
+		local userId = data.userId
+		local queue = QueueByMode[mode]
+
+		for i = #queue, 1, -1 do
+			if queue[i] == userId then
+				table.remove(queue, i)
+				break
+			end
+		end
+
+		localQueuedPlayers[userId] = nil
+	end
+end)
+
+-- Player requests matchmaking
+MatchmakingRequest.OnServerEvent:Connect(function(player, data)
+	local mode = data.mode
+	if not QueueByMode[mode] then
+		warn("Invalid mode:", mode)
+		return
+	end
+
+	addPlayerToQueue(player, mode)
+	tryMatchmaking(mode)
+end)
+
+-- Player cancels matchmaking
+CancelMatchmakingRequest.OnServerEvent:Connect(function(player)
+	removePlayerFromQueue(player.UserId)
+end)
+
+-- Remove players from queue on leave
+Players.PlayerRemoving:Connect(function(player)
+	removePlayerFromQueue(player.UserId)
+end)
