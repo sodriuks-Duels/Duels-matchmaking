@@ -50,9 +50,25 @@ local function stopTimer()
 end
 
 -- Toggle menu
-CoreGUI.Button.PlayTextButton.Activated:Connect(function()
+local function showMatchmaking()
 	MatchMakingFrame.Visible = true
-end)
+	-- Optional: bump ZIndex in case something overlays
+	if MatchMakingFrame.ZIndex < 10 then
+		MatchMakingFrame.ZIndex = 10
+	end
+	print("[MatchmakingUI] Opened matchmaking frame")
+end
+
+-- Ensure the button is interactable
+PlayButton.Active = true
+PlayButton.AutoButtonColor = true
+
+-- Support multiple input types for better device coverage
+PlayButton.Activated:Connect(showMatchmaking)
+PlayButton.MouseButton1Click:Connect(showMatchmaking)
+if PlayButton.TouchTap then
+	PlayButton.TouchTap:Connect(showMatchmaking)
+end
 
 -- Hook all matchmaking mode buttons (e.g., "1v1", "2v2")
 for _, modeFrame in pairs(MatchMakingFrame:GetChildren()) do
