@@ -1,0 +1,360 @@
+-- Services & modules
+local DataStoreService  = game:GetService("DataStoreService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local HttpService       = game:GetService("HttpService")
+
+local CamoList       = require(ReplicatedStorage.UIModules.CamoList)
+local GunList        = require(ReplicatedStorage.UIModules.GunList)
+local AttachmentList = require(ReplicatedStorage.UIModules.AttachmentList)
+local Defaults       = require(ReplicatedStorage.UIModules.Defaults)
+
+local PlayerDataManager = {}
+local store       = DataStoreService:GetDataStore("PlayerSkinData")
+local SAVE_COOLDOWN = 5
+
+-- State to prevent spamming saves
+local activeSaves   = {}
+local lastSaveTime  = {}
+local previousData  = {}
+
+-- Simple JSON compare/clone
+local function deepCompare(a, b)
+	return HttpService:JSONEncode(a) == HttpService:JSONEncode(b)
+end
+
+local function deepClone(t)
+	return HttpService:JSONDecode(HttpService:JSONEncode(t))
+end
+
+-- Helper: read all StringValue/IntValue children
+local function gather(folder, out, types)
+	if not folder then return end
+	for _, child in ipairs(folder:GetChildren()) do
+		if not types or table.find(types, child.ClassName) then
+			out[child.Name] = child.Value
+		end
+	end
+end
+
+-- Build a new SaveFolder under the player
+function PlayerDataManager.CreateSaveFolders(player)
+	local sf = Instance.new("Folder", player)
+	sf.Name = "SaveFolder"
+
+	-- Owned guns
+	local ownedGuns = Instance.new("Folder", sf)
+	ownedGuns.Name = "OwnedGuns"
+	for _, gunDef in pairs(GunList) do
+		local mark = Instance.new("StringValue", ownedGuns)
+		mark.Name  = gunDef.Name
+		mark.Value = table.find(Defaults.OwnedGuns, gunDef.Name) and "Owned" or "Locked"
+	end
+
+	-- Camos (equipped per-gun)
+	local cf = Instance.new("Folder", sf)
+	cf.Name = "Camos"
+	local defaultCamo = Defaults.DefaultCamo or "None"
+	for _, gun in pairs(GunList) do
+		local v = Instance.new("StringValue", cf)
+		v.Name  = gun.Name
+		v.Value = defaultCamo
+	end
+
+	-- OwnedCamos nested per-gun
+	local ocRoot = Instance.new("Folder", sf)
+	ocRoot.Name = "OwnedCamos"
+	for _, gun in pairs(GunList) do
+		local gunFolder = Instance.new("Folder", ocRoot)
+		gunFolder.Name = gun.Name
+		for _, cam in pairs(CamoList) do
+			local v = Instance.new("StringValue", gunFolder)
+			v.Name  = cam.Name
+			-- default camo is owned on every gun
+			v.Value = (cam.Name == defaultCamo) and "Owned" or "Locked"
+		end
+	end
+
+	-- Attachments as before, using Defaults.DefaultAttachments
+	local af = Instance.new("Folder", sf)
+	af.Name = "Attachments"
+	local oa = Instance.new("Folder", sf)
+	oa.Name = "OwnedAttachments"
+
+	for _, gun in pairs(GunList) do
+		-- Slots
+		local slotFolder = Instance.new("Folder", af)
+		slotFolder.Name = gun.Name
+		for _, slotType in ipairs({"Scope","Muzzle","Magazine"}) do
+			local val = Instance.new("StringValue", slotFolder)
+			val.Name  = slotType
+			val.Value = Defaults.DefaultAttachments[slotType] or "None"
+		end
+
+		-- Owned flags
+		local ownFolder = Instance.new("Folder", oa)
+		ownFolder.Name = gun.Name
+		for _, att in pairs(AttachmentList) do
+			local ok = (att.Type=="Scope"   and gun.CanHaveScope)
+				or (att.Type=="Muzzle"  and gun.CanHaveMuzzle)
+				or (att.Type=="Magazine"and gun.CanHaveMagazine)
+			if ok then
+				local v = Instance.new("StringValue", ownFolder)
+				v.Name  = att.Name
+				v.Value = (att.Name == Defaults.DefaultAttachments[att.Type]) and "Owned" or "Locked"
+			end
+		end
+	end
+
+	-- Currency counter
+	local currency = Instance.new("IntValue", sf)
+	currency.Name  = "Currency"
+	currency.Value = 0
+
+	-- Inventory → Cases
+	local inventory = Instance.new("Folder", sf)
+	inventory.Name  = "Inventory"
+	local cases = Instance.new("Folder", inventory)
+	cases.Name = "Cases"
+end
+
+-- Load from DataStore
+function PlayerDataManager.LoadPlayerData(player)
+	local success, data = pcall(function()
+		return store:GetAsync(player.UserId)
+	end)
+	if not success or type(data) ~= "table" then return end
+
+	local sf = player:FindFirstChild("SaveFolder")
+	if not sf then return end
+
+	-- Owned guns
+	if data.OwnedGuns then
+		local folder = sf:FindFirstChild("OwnedGuns")
+		for name, val in pairs(data.OwnedGuns) do
+			if folder and folder:FindFirstChild(name) then
+				folder[name].Value = val
+			end
+		end
+	end
+
+	-- Currency
+	if data.Currency and sf.Currency then
+		sf.Currency.Value = data.Currency
+	end
+
+	-- Cases
+	if data.Cases then
+		local casesFolder = sf.Inventory and sf.Inventory:FindFirstChild("Cases")
+		if casesFolder then
+			for name, val in pairs(data.Cases) do
+				local iv = casesFolder:FindFirstChild(name)
+				if not iv then
+					iv = Instance.new("IntValue", casesFolder)
+					iv.Name = name
+				end
+				iv.Value = val
+			end
+		end
+	end
+
+	-- Camos (equipped)
+	for gun, skin in pairs(data.Camos or {}) do
+		if sf.Camos:FindFirstChild(gun) then
+			sf.Camos[gun].Value = skin
+		end
+	end
+
+	-- OwnedCamos nested per-gun
+	if data.OwnedCamos then
+		local ocRoot = sf:FindFirstChild("OwnedCamos")
+		for gunName, camTbl in pairs(data.OwnedCamos) do
+			local gunFolder = ocRoot and ocRoot:FindFirstChild(gunName)
+			if gunFolder then
+				for camName, camVal in pairs(camTbl) do
+					if gunFolder:FindFirstChild(camName) then
+						gunFolder[camName].Value = camVal
+					end
+				end
+			end
+		end
+	end
+
+	-- Attachments & OwnedAttachments
+	for _, folderName in ipairs({"Attachments","OwnedAttachments"}) do
+		local parent = sf:FindFirstChild(folderName)
+		for gunName, tbl in pairs(data[folderName] or {}) do
+			local gunFolder = parent and parent:FindFirstChild(gunName)
+			if gunFolder then
+				for k, v in pairs(tbl) do
+					if gunFolder:FindFirstChild(k) then
+						gunFolder[k].Value = v
+					end
+				end
+			end
+		end
+	end
+end
+
+-- Save to DataStore
+function PlayerDataManager.SavePlayerData(player)
+	local now = tick()
+	local uid = player.UserId
+
+	if lastSaveTime[uid] and now - lastSaveTime[uid] < SAVE_COOLDOWN then
+		return
+	end
+	lastSaveTime[uid] = now
+	if activeSaves[uid] then return end
+
+	local sf = player:FindFirstChild("SaveFolder")
+	if not sf then return end
+
+	local data = {
+		OwnedGuns        = {},
+		Currency         = sf.Currency and sf.Currency.Value or 0,
+		Cases            = {},
+		Camos            = {},
+		OwnedCamos       = {},
+		Attachments      = {},
+		OwnedAttachments = {},
+	}
+
+	-- Gather everything
+	gather(sf:FindFirstChild("OwnedGuns"), data.OwnedGuns, {"StringValue"})
+	gather(sf.Inventory and sf.Inventory:FindFirstChild("Cases"), data.Cases, {"IntValue"})
+	gather(sf.Camos, data.Camos, {"StringValue"})
+
+	-- OwnedCamos nested per-gun
+	local ocRoot = sf:FindFirstChild("OwnedCamos")
+	if ocRoot then
+		for _, gunFolder in ipairs(ocRoot:GetChildren()) do
+			if gunFolder:IsA("Folder") then
+				data.OwnedCamos[gunFolder.Name] = {}
+				gather(gunFolder, data.OwnedCamos[gunFolder.Name], {"StringValue"})
+			end
+		end
+	end
+
+	for _, name in ipairs({"Attachments","OwnedAttachments"}) do
+		data[name] = {}
+		local parent = sf:FindFirstChild(name)
+		if parent then
+			for _, gunFolder in ipairs(parent:GetChildren()) do
+				if gunFolder:IsA("Folder") then
+					data[name][gunFolder.Name] = {}
+					gather(gunFolder, data[name][gunFolder.Name], {"StringValue"})
+				end
+			end
+		end
+	end
+
+	if previousData[uid] and deepCompare(previousData[uid], data) then
+		return
+	end
+
+	activeSaves[uid] = true
+	local ok, err = pcall(function()
+		store:SetAsync(uid, data)
+	end)
+	activeSaves[uid] = nil
+
+	if ok then
+		previousData[uid] = deepClone(data)
+	else
+		warn("[PlayerDataManager] Save failed:", err)
+	end
+end
+
+-- Grant a new gun
+function PlayerDataManager.UnlockGun(player, gunName)
+	local folder = player:FindFirstChild("SaveFolder")
+		and player.SaveFolder:FindFirstChild("OwnedGuns")
+	if folder and folder:FindFirstChild(gunName) then
+		folder[gunName].Value = "Owned"
+		PlayerDataManager.SavePlayerData(player)
+	end
+end
+
+-- Equip a camo (with lock check)
+function PlayerDataManager.SetGunSkin(player, gunName, skinName)
+	local sf = player.SaveFolder
+	if not (sf.Camos and sf.OwnedCamos) then return end
+
+	local ownedFolder = sf.OwnedCamos:FindFirstChild(gunName)
+	local owned = ownedFolder and ownedFolder:FindFirstChild(skinName)
+	if not (owned and owned.Value == "Owned") then
+		warn("Cannot equip locked camo:", skinName)
+		return
+	end
+
+	local slot = sf.Camos:FindFirstChild(gunName)
+	if slot then
+		slot.Value = skinName
+		PlayerDataManager.SavePlayerData(player)
+	end
+end
+
+-- Equip an attachment (with lock check)
+function PlayerDataManager.SetGunAttachment(player, gunName, attName, attType)
+	local sf = player.SaveFolder
+	if not (sf.Attachments and sf.OwnedAttachments) then return end
+
+	local gunFolder   = sf.Attachments:FindFirstChild(gunName)
+	local ownedFolder = sf.OwnedAttachments:FindFirstChild(gunName)
+	if not (gunFolder and ownedFolder) then return end
+
+	local ownedVal = ownedFolder:FindFirstChild(attName)
+	if not (ownedVal and ownedVal.Value == "Owned") then
+		warn("Cannot equip locked attachment:", attName)
+		return
+	end
+
+	local slot = gunFolder:FindFirstChild(attType)
+	if slot then
+		slot.Value = attName
+		PlayerDataManager.SavePlayerData(player)
+	end
+end
+
+-- Add a case to inventory
+function PlayerDataManager.AddInventoryItem(player,itemtype, item, amount)
+	local cases = player.SaveFolder
+		and player.SaveFolder.Inventory
+		and player.SaveFolder.Inventory.Cases
+	if not cases then return end
+	local itemfolder = player.SaveFolder.Inventory:FindFirstChild(itemtype)
+	local iv = itemfolder:FindFirstChild(item)
+	if not iv then
+		iv = Instance.new("IntValue", cases)
+		iv.Name = item
+	end
+	iv.Value = iv.Value + amount
+	PlayerDataManager.SavePlayerData(player)
+end
+
+-- Currency helpers
+function PlayerDataManager.AddCurrency(player,currencytype, amt)
+	local cv = player.SaveFolder and player.SaveFolder:FindFirstChild(currencytype)
+	if cv then
+		cv.Value = cv.Value + amt
+		PlayerDataManager.SavePlayerData(player)
+	end
+end
+
+function PlayerDataManager.SpendCurrency(player,currencytype, amt)
+	local cv = player.SaveFolder and player.SaveFolder:FindFirstChild(currencytype)
+	if cv and cv.Value >= amt then
+		cv.Value = cv.Value - amt
+		PlayerDataManager.SavePlayerData(player)
+		return true
+	end
+	return false
+end
+
+function PlayerDataManager.Cleanup(player)
+	lastSaveTime[player.UserId]    = nil
+	previousData[player.UserId]    = nil
+	activeSaves[player.UserId]     = nil
+end
+
+return PlayerDataManager
