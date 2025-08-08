@@ -137,12 +137,15 @@ local function tryMatchmaking(mode)
 				if total == requiredSize then
 					-- Build user list
 					local users = {}
+					local groupsInfo = {}
 					for _, idx in ipairs(selected) do
 						local entry = queue[idx]
 						if entry.kind == "solo" then
 							table.insert(users, entry.userId)
+							table.insert(groupsInfo, { kind = "solo", users = { entry.userId } })
 						else
 							for _, id in ipairs(entry.users) do table.insert(users, id) end
+							table.insert(groupsInfo, { kind = "group", groupId = entry.groupId, users = table.clone(entry.users) })
 						end
 					end
 
@@ -166,7 +169,7 @@ local function tryMatchmaking(mode)
 							mode = mode,
 							code = reservedServerCode,
 							users = users,
-							teleportData = { mode = mode }
+							teleportData = { mode = mode, groups = groupsInfo },
 						})
 					end)
 					return
@@ -257,7 +260,7 @@ MessagingService:SubscribeAsync(matchTopic, function(message)
 	end
 	if #playersHere > 0 then
 		pcall(function()
-			TeleportService:TeleportToPrivateServer(PlaceId, code, playersHere)
+			TeleportService:TeleportToPrivateServer(PlaceId, code, playersHere, nil, data.teleportData)
 		end)
 	end
 end)
