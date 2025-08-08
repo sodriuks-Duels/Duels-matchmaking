@@ -166,6 +166,7 @@ local function tryMatchmaking(mode)
 							mode = mode,
 							code = reservedServerCode,
 							users = users,
+							teleportData = { mode = mode }
 						})
 					end)
 					return
