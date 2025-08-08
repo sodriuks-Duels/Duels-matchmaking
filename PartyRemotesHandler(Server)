@@ -4,9 +4,30 @@ local PartyService = require(game.ServerScriptService:WaitForChild("PartyService
 
 local remotes = ReplicatedStorage:WaitForChild("PartyRemotes")
 
-remotes.PartyGetMembers.OnServerInvoke = function(player)
+-- Ensure PartyGetMembers exists
+local getMembers = remotes:FindFirstChild("PartyGetMembers")
+if not getMembers then
+	getMembers = Instance.new("RemoteFunction")
+	getMembers.Name = "PartyGetMembers"
+	getMembers.Parent = remotes
+end
+
+getMembers.OnServerInvoke = function(player)
 	local party = PartyService:GetParty(player)
 	return party and party.Members or {}
+end
+
+-- Ensure PartyGetLeader exists
+local getLeader = remotes:FindFirstChild("PartyGetLeader")
+if not getLeader then
+	getLeader = Instance.new("RemoteFunction")
+	getLeader.Name = "PartyGetLeader"
+	getLeader.Parent = remotes
+end
+
+getLeader.OnServerInvoke = function(player)
+	local party = PartyService:GetParty(player)
+	return party and party.Leader or nil
 end
 
 remotes.PartyInvite.OnServerInvoke = function(player, target)

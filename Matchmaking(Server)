@@ -6,8 +6,11 @@ local TeleportService = game:GetService("TeleportService")
 local MatchmakingRequest = ReplicatedStorage:WaitForChild("MatchmakingRequest")
 local CancelMatchmakingRequest = ReplicatedStorage:WaitForChild("CancelMatchmakingRequest")
 
+local PartyService = require(game.ServerScriptService:WaitForChild("PartyService"))
+
 local PlaceId = game.PlaceId
 
+-- Queue entries are either solos or groups; groups are not split
 local QueueByMode = {
 	["1v1"] = {},
 	["2v2"] = {},
@@ -20,140 +23,203 @@ local modeSizes = {
 	["3v3"] = 6,
 }
 
--- Track players who requested matchmaking locally
+-- Track players who requested matchmaking locally (maps to group if any)
+-- userId -> { mode = string, groupId = string|nil }
 local localQueuedPlayers = {}
 
--- Topic to send and receive queue updates between servers
+-- Topics
 local topic = "MatchmakingQueueUpdate"
 local matchTopic = "MatchmakingMatchFormed"
 
--- Adds a player to local queue and broadcasts update
-local function addPlayerToQueue(player, mode)
-	if not QueueByMode[mode] then return end
+-- Helpers
+local function isUserQueued(userId)
+	return localQueuedPlayers[userId] ~= nil
+end
 
-	-- Prevent duplicates
-	if localQueuedPlayers[player.UserId] then
-		-- already queued
+local function findEntryContainingUser(queue, userId)
+	for idx, entry in ipairs(queue) do
+		if entry.kind == "solo" and entry.userId == userId then
+			return idx, entry
+		elseif entry.kind == "group" then
+			for _, id in ipairs(entry.users) do
+				if id == userId then
+					return idx, entry
+				end
+			end
+		end
+	end
+	return nil, nil
+end
+
+local function removeUserFromQueue(userId)
+	local info = localQueuedPlayers[userId]
+	if not info then return end
+	local mode = info.mode
+	local queue = QueueByMode[mode]
+	local idx, entry = findEntryContainingUser(queue, userId)
+	if not idx then
+		localQueuedPlayers[userId] = nil
 		return
 	end
 
-	table.insert(QueueByMode[mode], player.UserId)
-	localQueuedPlayers[player.UserId] = mode
-
-	-- Broadcast update to all servers (pcall for safety)
-	pcall(function()
-		MessagingService:PublishAsync(topic, {
-			action = "add",
-			userId = player.UserId,
-			mode = mode,
-		})
-	end)
-end
-
--- Removes a player locally and broadcasts update
-local function removePlayerFromQueue(userId)
-	local mode = localQueuedPlayers[userId]
-	if not mode then return end
-
-	-- Remove from mode queue
-	local queue = QueueByMode[mode]
-	for i = #queue, 1, -1 do
-		if queue[i] == userId then
-			table.remove(queue, i)
-			break
+	if entry.kind == "solo" then
+		table.remove(queue, idx)
+		localQueuedPlayers[userId] = nil
+	else
+		-- group: remove the user from the group
+		for i = #entry.users, 1, -1 do
+			if entry.users[i] == userId then
+				table.remove(entry.users, i)
+				entry.size -= 1
+				break
+			end
+		end
+		localQueuedPlayers[userId] = nil
+		if entry.size <= 0 then
+			table.remove(queue, idx)
 		end
 	end
 
-	localQueuedPlayers[userId] = nil
-
-	-- Broadcast removal (pcall for safety)
+	-- Broadcast removal for cross-server sync
 	pcall(function()
 		MessagingService:PublishAsync(topic, {
-			action = "remove",
+			action = "remove_user",
 			userId = userId,
 			mode = mode,
 		})
 	end)
 end
 
--- Attempt to form matches using global queue (cross-server)
-local function tryMatchmaking(mode)
-	local queue = QueueByMode[mode]
-	local requiredSize = modeSizes[mode]
+local function addSoloToQueue(player, mode)
+	if not QueueByMode[mode] then return end
+	if isUserQueued(player.UserId) then return end
 
-	if #queue < requiredSize then
-		return
-	end
+	table.insert(QueueByMode[mode], { kind = "solo", userId = player.UserId, size = 1 })
+	localQueuedPlayers[player.UserId] = { mode = mode }
 
-	-- Select first N userIds from the aggregated queue
-	local selectedUserIds = {}
-	for i = 1, requiredSize do
-		table.insert(selectedUserIds, queue[i])
-	end
-
-	-- Remove selected userIds from local queue and local map
-	for _, selectedUserId in ipairs(selectedUserIds) do
-		for i = #queue, 1, -1 do
-			if queue[i] == selectedUserId then
-				table.remove(queue, i)
-				break
-			end
-		end
-		localQueuedPlayers[selectedUserId] = nil
-	end
-
-	-- Reserve private server and publish match so every server teleports its local subset
-	local reservedServerCode = TeleportService:ReserveServer(PlaceId)
 	pcall(function()
-		MessagingService:PublishAsync(matchTopic, {
-			action = "match",
-			mode = mode,
-			code = reservedServerCode,
-			users = selectedUserIds,
-		})
+		MessagingService:PublishAsync(topic, { action = "add_solo", userId = player.UserId, mode = mode })
 	end)
 end
 
--- Handle incoming messages from other servers
-MessagingService:SubscribeAsync(topic, function(message)
-	local data = message.Data
-	if data.action == "add" then
-		-- Add userId to queues remotely (do not mark as localQueued)
-		local mode = data.mode
-		local userId = data.userId
-		if QueueByMode[mode] then
-			-- Avoid duplicates in the raw queue
-			local alreadyInQueue = false
-			for _, id in ipairs(QueueByMode[mode]) do
-				if id == userId then
-					alreadyInQueue = true
-					break
+local function addGroupToQueue(users, mode, groupId)
+	if not QueueByMode[mode] then return end
+	-- Prevent duplicates if any user already queued
+	for _, uid in ipairs(users) do
+		if isUserQueued(uid) then return end
+	end
+
+	local entry = { kind = "group", users = table.clone(users), groupId = tostring(groupId), size = #users }
+	table.insert(QueueByMode[mode], entry)
+	for _, uid in ipairs(users) do
+		localQueuedPlayers[uid] = { mode = mode, groupId = entry.groupId }
+	end
+
+	pcall(function()
+		MessagingService:PublishAsync(topic, { action = "add_group", users = users, groupId = entry.groupId, mode = mode })
+	end)
+end
+
+-- Try to form a match of exact required size without splitting groups (first-fit)
+local function tryMatchmaking(mode)
+	local queue = QueueByMode[mode]
+	local requiredSize = modeSizes[mode]
+	if #queue == 0 then return end
+
+	for startIdx = 1, #queue do
+		local selected = {}
+		local total = 0
+		for i = startIdx, #queue do
+			local e = queue[i]
+			if total + e.size <= requiredSize then
+				table.insert(selected, i)
+				total += e.size
+				if total == requiredSize then
+					-- Build user list
+					local users = {}
+					for _, idx in ipairs(selected) do
+						local entry = queue[idx]
+						if entry.kind == "solo" then
+							table.insert(users, entry.userId)
+						else
+							for _, id in ipairs(entry.users) do table.insert(users, id) end
+						end
+					end
+
+					-- Remove selected entries from queue and clear local map
+					-- Remove from highest index to lowest to keep indices valid
+					table.sort(selected, function(a,b) return a>b end)
+					for _, idxToRemove in ipairs(selected) do
+						local entry = table.remove(queue, idxToRemove)
+						if entry.kind == "solo" then
+							localQueuedPlayers[entry.userId] = nil
+						else
+							for _, id in ipairs(entry.users) do localQueuedPlayers[id] = nil end
+						end
+					end
+
+					-- Publish match so all servers teleport their local subset
+					local reservedServerCode = TeleportService:ReserveServer(PlaceId)
+					pcall(function()
+						MessagingService:PublishAsync(matchTopic, {
+							action = "match",
+							mode = mode,
+							code = reservedServerCode,
+							users = users,
+						})
+					end)
+					return
 				end
 			end
-			if not alreadyInQueue then
-				table.insert(QueueByMode[mode], userId)
-			end
-			-- Attempt matchmaking using aggregated queue (cross-server)
-			tryMatchmaking(mode)
 		end
-	elseif data.action == "remove" then
-		-- Remove userId from queue remotely
-		local mode = data.mode
-		local userId = data.userId
+	end
+end
+
+-- Cross-server sync
+MessagingService:SubscribeAsync(topic, function(message)
+	local data = message.Data
+	local action = data.action
+	local mode = data.mode
+	if not QueueByMode[mode] then return end
+
+	if action == "add_solo" then
+		-- Avoid duplicates
+		for _, entry in ipairs(QueueByMode[mode]) do
+			if entry.kind == "solo" and entry.userId == data.userId then return end
+		end
+		table.insert(QueueByMode[mode], { kind = "solo", userId = data.userId, size = 1 })
+	elseif action == "add_group" then
+		-- Avoid duplicates (any user from group already present?)
+		for _, uid in ipairs(data.users or {}) do
+			for _, entry in ipairs(QueueByMode[mode]) do
+				if (entry.kind == "solo" and entry.userId == uid) then return end
+				if entry.kind == "group" then
+					for _, id in ipairs(entry.users) do if id == uid then return end end
+				end
+			end
+		end
+		table.insert(QueueByMode[mode], { kind = "group", users = table.clone(data.users or {}), groupId = tostring(data.groupId), size = #(data.users or {}) })
+	elseif action == "remove_user" then
+		-- Remove a single user from any entry
 		local queue = QueueByMode[mode]
-
-		for i = #queue, 1, -1 do
-			if queue[i] == userId then
-				table.remove(queue, i)
-				break
+		local idx, entry = findEntryContainingUser(queue, data.userId)
+		if idx then
+			if entry.kind == "solo" then
+				table.remove(queue, idx)
+			else
+				for i = #entry.users, 1, -1 do
+					if entry.users[i] == data.userId then
+						table.remove(entry.users, i)
+						entry.size -= 1
+						break
+					end
+				end
+				if entry.size <= 0 then table.remove(queue, idx) end
 			end
 		end
-
-		localQueuedPlayers[userId] = nil
 	end
 end)
 
--- Receive match formed announcements; teleport local subset to the same private server
 MessagingService:SubscribeAsync(matchTopic, function(message)
 	local data = message.Data
 	if data.action ~= "match" then return end
@@ -162,23 +228,30 @@ MessagingService:SubscribeAsync(matchTopic, function(message)
 	local code = data.code
 	local users = data.users or {}
 
-	-- Remove these users from local queue/state, then teleport any that are present here
+	-- Remove these users locally if they exist
 	local queue = QueueByMode[mode]
 	if queue then
-		for _, userId in ipairs(users) do
-			for i = #queue, 1, -1 do
-				if queue[i] == userId then
-					table.remove(queue, i)
-					break
+		for _, uid in ipairs(users) do
+			local idx = select(1, findEntryContainingUser(queue, uid))
+			if idx then
+				local entry = queue[idx]
+				if entry.kind == "solo" then
+					table.remove(queue, idx)
+				else
+					for i = #entry.users, 1, -1 do
+						if entry.users[i] == uid then table.remove(entry.users, i) entry.size -= 1 break end
+					end
+					if entry.size <= 0 then table.remove(queue, idx) end
 				end
 			end
-			localQueuedPlayers[userId] = nil
+			localQueuedPlayers[uid] = nil
 		end
 	end
 
+	-- Teleport any users present on this server
 	local playersHere = {}
-	for _, userId in ipairs(users) do
-		local p = Players:GetPlayerByUserId(userId)
+	for _, uid in ipairs(users) do
+		local p = Players:GetPlayerByUserId(uid)
 		if p then table.insert(playersHere, p) end
 	end
 	if #playersHere > 0 then
@@ -188,7 +261,7 @@ MessagingService:SubscribeAsync(matchTopic, function(message)
 	end
 end)
 
--- Player requests matchmaking
+-- Requests
 MatchmakingRequest.OnServerEvent:Connect(function(player, data)
 	local mode = data.mode
 	if not QueueByMode[mode] then
@@ -196,16 +269,30 @@ MatchmakingRequest.OnServerEvent:Connect(function(player, data)
 		return
 	end
 
-	addPlayerToQueue(player, mode)
+	-- Determine party and enforce leader-only
+	local party = PartyService:GetParty(player)
+	if party then
+		if party.Leader ~= player then
+			-- Not leader: ignore request
+			return
+		end
+		-- Build userId list for the whole party
+		local users = {}
+		for _, member in ipairs(party.Members) do table.insert(users, member.UserId) end
+		addGroupToQueue(users, mode, party.Leader.UserId)
+	else
+		-- No party: treat as solo (they are implicitly their own leader)
+		addSoloToQueue(player, mode)
+	end
+
 	tryMatchmaking(mode)
 end)
 
--- Player cancels matchmaking
 CancelMatchmakingRequest.OnServerEvent:Connect(function(player)
-	removePlayerFromQueue(player.UserId)
+	-- Remove the player (and potentially shrink their group)
+	removeUserFromQueue(player.UserId)
 end)
 
--- Remove players from queue on leave
 Players.PlayerRemoving:Connect(function(player)
-	removePlayerFromQueue(player.UserId)
+	removeUserFromQueue(player.UserId)
 end)
