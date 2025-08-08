@@ -1,0 +1,112 @@
+local PartyService = {}
+
+local parties = {}         -- {player = {Leader = ..., Members = {...}}}
+local invites = {}         -- {target = inviter}
+
+function PartyService:GetParty(player)
+	for _, party in pairs(parties) do
+		for _, member in pairs(party.Members) do
+			if member == player then
+				return party
+			end
+		end
+	end
+	return nil
+end
+
+function PartyService:CreateParty(leader)
+	local party = {
+		Leader = leader,
+		Members = {leader}
+	}
+	parties[leader] = party
+	return party
+end
+
+function PartyService:AddMember(party, player)
+	table.insert(party.Members, player)
+	return party
+end
+
+function PartyService:LeaveParty(player)
+	local party = self:GetParty(player)
+	if not party then return end
+
+	for i, member in ipairs(party.Members) do
+		if member == player then
+			table.remove(party.Members, i)
+			break
+		end
+	end
+
+	if player == party.Leader then
+		if #party.Members > 0 then
+			party.Leader = party.Members[1]
+		else
+			parties[party.Leader] = nil
+			return
+		end
+	end
+	self:FirePartyUpdate(party)
+end
+
+function PartyService:KickMember(leader, target)
+	local party = self:GetParty(leader)
+	if not party then return false, "NotInParty" end
+
+	if party.Leader ~= leader then
+		return false, "NotLeader"
+	end
+
+	if leader == target then
+		return false, "CannotKickYourself"
+	end
+
+	-- Find and remove target
+	for i, member in ipairs(party.Members) do
+		if member == target then
+			table.remove(party.Members, i)
+
+			-- Optional: Notify kicked player
+			game.ReplicatedStorage.PartyRemotes.Kicked:FireClient(target)
+
+			self:FirePartyUpdate(party)
+			return true
+		end
+	end
+
+	return false, "TargetNotInParty"
+end
+
+
+function PartyService:FirePartyUpdate(party)
+	for _, member in ipairs(party.Members) do
+		game.ReplicatedStorage.PartyRemotes.PartyMembersChanged:FireClient(member, party.Members)
+	end
+end
+
+function PartyService:Invite(inviter, target)
+	if invites[target] then return false end
+	
+	game.ReplicatedStorage.PartyRemotes.Invited:FireClient(target, inviter)
+	
+	invites[target] = inviter
+	return true
+end
+
+function PartyService:AcceptInvite(player)
+	local inviter = invites[player]
+	if not inviter then return false end
+	invites[player] = nil
+
+	local party = self:GetParty(inviter)
+	if not party then
+		party = self:CreateParty(inviter)
+	end
+
+	table.insert(party.Members, player)
+	self:FirePartyUpdate(party)
+	return true
+end
+
+return PartyService
