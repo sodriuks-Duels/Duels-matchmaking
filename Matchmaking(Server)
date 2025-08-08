@@ -39,12 +39,14 @@ local function addPlayerToQueue(player, mode)
 	table.insert(QueueByMode[mode], player.UserId)
 	localQueuedPlayers[player.UserId] = mode
 
-	-- Broadcast update to all servers
-	MessagingService:PublishAsync(topic, {
-		action = "add",
-		userId = player.UserId,
-		mode = mode,
-	})
+	-- Broadcast update to all servers (pcall for safety)
+	pcall(function()
+		MessagingService:PublishAsync(topic, {
+			action = "add",
+			userId = player.UserId,
+			mode = mode,
+		})
+	end)
 end
 
 -- Removes a player locally and broadcasts update
@@ -63,59 +65,89 @@ local function removePlayerFromQueue(userId)
 
 	localQueuedPlayers[userId] = nil
 
-	-- Broadcast removal
-	MessagingService:PublishAsync(topic, {
-		action = "remove",
-		userId = userId,
-		mode = mode,
-	})
+	-- Broadcast removal (pcall for safety)
+	pcall(function()
+		MessagingService:PublishAsync(topic, {
+			action = "remove",
+			userId = userId,
+			mode = mode,
+		})
+	end)
 end
 
--- Attempt to form matches when enough players globally queued
--- (For demo, only local queues are considered here; ideally aggregate global data)
+-- Attempt to form matches when enough players locally queued (present in this server)
 local function tryMatchmaking(mode)
 	local queue = QueueByMode[mode]
 	local requiredSize = modeSizes[mode]
 
-	if #queue >= requiredSize then
-		-- Remove players from queue
-		local playersForMatch = {}
-		for i = 1, requiredSize do
-			table.insert(playersForMatch, queue[i])
+	-- Collect up to requiredSize players that are actually present on this server
+	local presentUserIds = {}
+	for _, userId in ipairs(queue) do
+		if Players:GetPlayerByUserId(userId) then
+			table.insert(presentUserIds, userId)
+			if #presentUserIds == requiredSize then
+				break
+			end
 		end
-		for i = requiredSize, 1, -1 do
-			table.remove(queue, i)
-		end
+	end
 
-		-- Notify removal for all match players
-		for _, userId in ipairs(playersForMatch) do
-			localQueuedPlayers[userId] = nil
+	if #presentUserIds < requiredSize then
+		return
+	end
+
+	-- Remove only the selected, present players from the queue
+	for _, selectedUserId in ipairs(presentUserIds) do
+		for i = #queue, 1, -1 do
+			if queue[i] == selectedUserId then
+				table.remove(queue, i)
+				break
+			end
+		end
+		localQueuedPlayers[selectedUserId] = nil
+	end
+
+	-- Notify removal for all match players
+	for _, userId in ipairs(presentUserIds) do
+		pcall(function()
 			MessagingService:PublishAsync(topic, {
 				action = "remove",
 				userId = userId,
 				mode = mode,
 			})
+		end)
+	end
+
+	-- Reserve private server
+	local reservedServerCode = TeleportService:ReserveServer(PlaceId)
+
+	-- Create player list for teleport
+	local playersForTeleport = {}
+	for _, userId in ipairs(presentUserIds) do
+		local player = Players:GetPlayerByUserId(userId)
+		if player then
+			table.insert(playersForTeleport, player)
 		end
+	end
 
-		-- Reserve private server
-		local reservedServerCode = TeleportService:ReserveServer(PlaceId)
-
-		-- Create player list for teleport
-		local playersForTeleport = {}
-
-		for _, userId in ipairs(playersForMatch) do
-			local player = Players:GetPlayerByUserId(userId)
-			if player then
-				table.insert(playersForTeleport, player)
+	if #playersForTeleport == requiredSize then
+		-- Teleport grouped players to reserved server in a single call
+		local ok, err = pcall(function()
+			TeleportService:TeleportToPrivateServer(PlaceId, reservedServerCode, playersForTeleport)
+		end)
+		if not ok then
+			warn("Teleport failed for mode", mode, err)
+			-- On failure, re-add players to the front of the queue
+			for _, player in ipairs(playersForTeleport) do
+				local userId = player.UserId
+				table.insert(queue, 1, userId)
+				localQueuedPlayers[userId] = mode
+				pcall(function()
+					MessagingService:PublishAsync(topic, { action = "add", userId = userId, mode = mode })
+				end)
 			end
+		else
+			print("Match created for mode", mode)
 		end
-
-		-- Teleport grouped players to reserved server
-		for _, player in ipairs(playersForTeleport) do
-			TeleportService:TeleportToPrivateServer(PlaceId, reservedServerCode, {player})
-		end
-
-		print("Match created for mode", mode)
 	end
 end
 
@@ -123,13 +155,23 @@ end
 MessagingService:SubscribeAsync(topic, function(message)
 	local data = message.Data
 	if data.action == "add" then
-		-- Add userId to queues remotely
+		-- Add userId to queues remotely (do not mark as localQueued)
 		local mode = data.mode
 		local userId = data.userId
-
-		-- Avoid adding users already local queued
-		if not localQueuedPlayers[userId] then
-			table.insert(QueueByMode[mode], userId)
+		if QueueByMode[mode] then
+			-- Avoid duplicates in the raw queue
+			local alreadyInQueue = false
+			for _, id in ipairs(QueueByMode[mode]) do
+				if id == userId then
+					alreadyInQueue = true
+					break
+				end
+			end
+			if not alreadyInQueue then
+				table.insert(QueueByMode[mode], userId)
+			end
+			-- Attempt matchmaking using locally present players
+			tryMatchmaking(mode)
 		end
 	elseif data.action == "remove" then
 		-- Remove userId from queue remotely
