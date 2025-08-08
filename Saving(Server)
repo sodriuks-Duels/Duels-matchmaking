@@ -1,7 +1,7 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-local PlayerDataManager = require(script.PlayerDataManager)
+local PlayerDataManager = require(game.ServerScriptService:WaitForChild("PlayerDataManager"))
 local GunList = require(ReplicatedStorage.UIModules.GunList)
 local RemoteEvents = ReplicatedStorage.RemoteEvents
 local SkinSelected = RemoteEvents.SkinSelected
@@ -47,6 +47,7 @@ BuyGun.OnServerEvent:Connect(function(player, gunName)
 	local gun = ownedGuns:FindFirstChild(gunName)
 	if gun.Value == "Owned" then return end
 	gun.Value = "Owned"
+	PlayerDataManager.SavePlayerData(player)
 
 	print(player.Name .. " bought " .. gunName)
 end)

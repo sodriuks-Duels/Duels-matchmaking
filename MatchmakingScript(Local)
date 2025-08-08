@@ -7,6 +7,7 @@ local CoreGUI = PlayerGui:WaitForChild("ScreenGui")
 
 local MatchmakingEvent = ReplicatedStorage:WaitForChild("MatchmakingRequest")
 local CancelMatchmakingEvent = ReplicatedStorage:WaitForChild("CancelMatchmakingRequest")
+local PartyRemotes = ReplicatedStorage:WaitForChild("PartyRemotes")
 
 local MatchMakingFrame = CoreGUI:WaitForChild("MatchMakingFrame")
 local SearchingFrame = CoreGUI:WaitForChild("SearchingForMatchFrame")
@@ -50,15 +51,45 @@ local function stopTimer()
 end
 
 -- Toggle menu
-CoreGUI.Button.PlayTextButton.Activated:Connect(function()
+local function showMatchmaking()
 	MatchMakingFrame.Visible = true
-end)
+	-- Optional: bump ZIndex in case something overlays
+	if MatchMakingFrame.ZIndex < 10 then
+		MatchMakingFrame.ZIndex = 10
+	end
+	print("[MatchmakingUI] Opened matchmaking frame")
+end
+
+-- Ensure the button is interactable
+PlayButton.Active = true
+PlayButton.AutoButtonColor = true
+
+-- Support multiple input types for better device coverage
+PlayButton.Activated:Connect(showMatchmaking)
+PlayButton.MouseButton1Click:Connect(showMatchmaking)
+if PlayButton.TouchTap then
+	PlayButton.TouchTap:Connect(showMatchmaking)
+end
 
 -- Hook all matchmaking mode buttons (e.g., "1v1", "2v2")
 for _, modeFrame in pairs(MatchMakingFrame:GetChildren()) do
 	if modeFrame:IsA("Frame") and modeFrame:FindFirstChild("Play2") then
 		modeFrame.Play2.Activated:Connect(function()
 			local selectedMode = modeFrame.Name
+
+			-- Leader-only check using PartyRemotes
+			local members = {}
+			local ok, result = pcall(function()
+				return PartyRemotes.PartyGetMembers:InvokeServer()
+			end)
+			if ok and type(result) == "table" and #result > 0 then
+				-- Assume leader is first member according to PartyService
+				local leader = result[1]
+				if leader ~= Player then
+					warn("Only the party leader can start matchmaking")
+					return
+				end
+			end
 
 			-- Start search
 			MatchmakingEvent:FireServer({ mode = selectedMode })
