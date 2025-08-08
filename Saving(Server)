@@ -1,0 +1,61 @@
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local PlayerDataManager = require(script.PlayerDataManager)
+local GunList = require(ReplicatedStorage.UIModules.GunList)
+local RemoteEvents = ReplicatedStorage.RemoteEvents
+local SkinSelected = RemoteEvents.SkinSelected
+local AttachmentSelected = RemoteEvents.AttachmentSelected
+local BuyGun = RemoteEvents.BuyGun
+
+
+Players.PlayerAdded:Connect(function(player)
+	PlayerDataManager.CreateSaveFolders(player)
+	task.delay(1, function()
+		PlayerDataManager.LoadPlayerData(player)
+	end)
+end)
+
+Players.PlayerRemoving:Connect(function(player)
+	PlayerDataManager.SavePlayerData(player)
+	PlayerDataManager.Cleanup(player)
+end)
+
+SkinSelected.OnServerEvent:Connect(function(player, gunName, selectedSkin)
+	PlayerDataManager.SetGunSkin(player, gunName, selectedSkin)
+end)
+
+AttachmentSelected.OnServerEvent:Connect(function(player, gunName, attachmentName, attachmentType)
+	PlayerDataManager.SetGunAttachment(player, gunName, attachmentName, attachmentType)
+end)
+
+BuyGun.OnServerEvent:Connect(function(player, gunName)
+	print("Success")
+	local saveFolder = player:FindFirstChild("SaveFolder")
+	if not saveFolder then return end
+
+	local ownedGuns = saveFolder:FindFirstChild("OwnedGuns")
+	local currency = saveFolder:FindFirstChild("Currency")
+	if not ownedGuns or not currency then print("OwnedGunsAndCurrencyError") return end	
+
+	local gunData = GunList[gunName]
+	if not gunData then return end
+
+	local price = gunData.Price
+	if currency.Value < price then return end
+	currency.Value -= price
+	local gun = ownedGuns:FindFirstChild(gunName)
+	if gun.Value == "Owned" then return end
+	gun.Value = "Owned"
+
+	print(player.Name .. " bought " .. gunName)
+end)
+
+
+-- Example usage of custom API
+-- Unlock a camo:
+-- PlayerDataManager.UnlockCamo(player, "Desert")
+
+-- Add/spend currency:
+-- PlayerDataManager.AddCurrency(player, 100)
+-- local success = PlayerDataManager.SpendCurrency(player, 50)
