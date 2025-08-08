@@ -318,16 +318,23 @@ end
 
 -- Add a case to inventory
 function PlayerDataManager.AddInventoryItem(player,itemtype, item, amount)
-	local cases = player.SaveFolder
-		and player.SaveFolder.Inventory
-		and player.SaveFolder.Inventory.Cases
-	if not cases then return end
-	local itemfolder = player.SaveFolder.Inventory:FindFirstChild(itemtype)
-	local iv = itemfolder:FindFirstChild(item)
-	if not iv then
-		iv = Instance.new("IntValue", cases)
-		iv.Name = item
+	local inventory = player.SaveFolder and player.SaveFolder.Inventory
+	if not inventory then return end
+
+	local categoryFolder = inventory:FindFirstChild(itemtype)
+	if not categoryFolder then
+		categoryFolder = Instance.new("Folder")
+		categoryFolder.Name = itemtype
+		categoryFolder.Parent = inventory
 	end
+
+	local iv = categoryFolder:FindFirstChild(item)
+	if not iv then
+		iv = Instance.new("IntValue")
+		iv.Name = item
+		iv.Parent = categoryFolder
+	end
+
 	iv.Value = iv.Value + amount
 	PlayerDataManager.SavePlayerData(player)
 end

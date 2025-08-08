@@ -12,7 +12,7 @@ local UITemplates = ReplicatedStorage:WaitForChild("UITemplates")
 
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
-local ownedFolder = player:WaitForChild("SaveFolder"):FindFirstChild("OwnedGuns")
+local ownedFolder = player:WaitForChild("SaveFolder"):WaitForChild("OwnedGuns")
 local buyRemote = ReplicatedStorage.RemoteEvents:WaitForChild("BuyGun")
 
 local screenGui = playerGui:WaitForChild("ScreenGui")
@@ -89,16 +89,16 @@ local function selectWeapon(gun)
 				local ownedguns = savefolder:WaitForChild("OwnedGuns")
 				local ownedgun = ownedguns:FindFirstChild(gunName)
 				ownedgun.Changed:Connect(function()
-					if ownedgun then
+					if ownedgun and ownedgun.Value == "Owned" then
 						local gunInList = GunList[ownedgun.Name]
 						local Category = weaponTypes:FindFirstChild(gunInList.Type)
-						local Frame = Category.Frame
-						local gun = Frame:FindFirstChild(ownedgun.Name)
-						if gun and "Owned" then
+						local Frame = Category and Category:FindFirstChild("Frame")
+						local gunFrame = Frame and Frame:FindFirstChild(ownedgun.Name)
+						if gunFrame then
 							GunTemplate.Remove()
 							GunTemplate.New()
 							buyButton.Visible = false
-							selectWeapon(gun)
+							selectWeapon(gunFrame)
 						end
 					end
 				end)
