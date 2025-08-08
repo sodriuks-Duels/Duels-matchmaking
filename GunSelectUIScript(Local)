@@ -1,0 +1,195 @@
+local TweenService = game:GetService("TweenService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Players = game:GetService("Players")
+
+
+local GunRotator = require(ReplicatedStorage.UIModules.GunRotator)
+local GunManager = require(ReplicatedStorage.UIModules.GunManager)
+local GunList = require(ReplicatedStorage.UIModules.GunList)
+local GunTemplate = require(ReplicatedStorage.UIModules.GunTemplate)
+
+local UITemplates = ReplicatedStorage:WaitForChild("UITemplates")
+
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+local ownedFolder = player:WaitForChild("SaveFolder"):FindFirstChild("OwnedGuns")
+local buyRemote = ReplicatedStorage.RemoteEvents:WaitForChild("BuyGun")
+
+local screenGui = playerGui:WaitForChild("ScreenGui")
+assert(screenGui, "Could not find a ScreenGui with GunSelectUI")
+
+local tweenInfo = TweenInfo.new(0.2, Enum.EasingStyle.Exponential, Enum.EasingDirection.Out)
+local inflate = UDim2.new(1, 0, 1, 0)
+local deflate = UDim2.new(0, 0, 0, 0)
+
+local weaponTypes = screenGui.GunSelectUI:WaitForChild("WeaponTypes")
+local state = screenGui.Buttons:WaitForChild("State")
+local previousState = state.Value
+
+local buyButton = screenGui:FindFirstChild("BuyButton")
+if not buyButton then
+	buyButton = UITemplates:WaitForChild("BuyButtonTemplate"):Clone()
+	buyButton.Name = "BuyButton"
+	buyButton.Visible = false
+	buyButton.Parent = screenGui
+end
+
+local buyConn
+local currentController = nil
+local busy = false
+
+local function tweenBackground(bg, targetSize)
+	if bg then
+		bg.Visible = true
+		TweenService:Create(bg, tweenInfo, { Size = targetSize }):Play()
+	end
+end
+
+local function selectWeapon(gun)
+	if busy then 
+		print("[DEBUG] Busy, skipping selectWeapon for", gun.Name)
+		return 
+	end
+	busy = true
+
+	print("[DEBUG] Selecting weapon:", gun.Name)
+
+	local gunName = gun.Name
+	local cam = workspace.CurrentCamera
+	local pos = cam.CFrame.Position + cam.CFrame.LookVector * 5
+	local rot = CFrame.lookAt(pos, pos + cam.CFrame.LookVector)
+
+	if currentController then
+		print("[DEBUG] Removing previous controller")
+		currentController:Remove()
+		currentController = nil
+	end
+
+	if buyConn then
+		print("[DEBUG] Disconnecting old buy connection")
+		buyConn:Disconnect()
+		buyConn = nil
+	end
+
+	local isOwned = ownedFolder and ownedFolder:FindFirstChild(gunName)
+
+	if isOwned and isOwned.Value == "Owned" then
+		print("[DEBUG] Gun is owned:", gunName)
+		buyButton.Visible = false
+	else
+		local gunData = GunList[gunName]
+		if gunData and gunData.Price then
+			print("[DEBUG] Gun not owned. Price:", gunData.Price)
+			buyButton.Visible = true
+			buyButton.Button.Price.Text = tostring(gunData.Price)
+			buyConn = buyButton.Button.MouseButton1Click:Connect(function()
+				print("[DEBUG] Buying gun:", gunName)
+				buyRemote:FireServer(gunName)
+				local savefolder = player:WaitForChild("SaveFolder")
+				local ownedguns = savefolder:WaitForChild("OwnedGuns")
+				local ownedgun = ownedguns:FindFirstChild(gunName)
+				ownedgun.Changed:Connect(function()
+					if ownedgun then
+						local gunInList = GunList[ownedgun.Name]
+						local Category = weaponTypes:FindFirstChild(gunInList.Type)
+						local Frame = Category.Frame
+						local gun = Frame:FindFirstChild(ownedgun.Name)
+						if gun and "Owned" then
+							GunTemplate.Remove()
+							GunTemplate.New()
+							buyButton.Visible = false
+							selectWeapon(gun)
+						end
+					end
+				end)
+			end)
+		else
+			print("[DEBUG] No gun data found for:", gunName)
+			buyButton.Visible = false
+		end
+	end
+
+	print("[DEBUG] Creating new controller for", gunName)
+	currentController = GunRotator.new(gunName, pos, rot, 180, -20, 20)
+	GunManager.CurrentController = currentController
+
+	tweenBackground(gun:FindFirstChild("Background"), inflate)
+
+	for _, category in ipairs(weaponTypes:GetChildren()) do
+		local frame = category:FindFirstChild("Frame")
+		if frame then
+			for _, otherGun in ipairs(frame:GetChildren()) do
+				if otherGun:IsA("Frame") and otherGun ~= gun then
+					print("[DEBUG] Creating new controller for", gunName)
+					tweenBackground(otherGun:FindFirstChild("Background"), deflate)
+				end
+			end
+		end
+	end
+
+	busy = false
+end
+
+local function setupWeaponButtons()
+	for _, category in ipairs(weaponTypes:GetChildren()) do
+		local frame = category:FindFirstChild("Frame")
+		if frame then
+			for _, gun in ipairs(frame:GetChildren()) do
+				if gun:IsA("Frame") then
+					local button = gun:FindFirstChildWhichIsA("GuiButton")
+					if button then
+						button.Visible = true
+						button.Active = true
+						button.MouseButton1Click:Connect(function()
+							selectWeapon(gun)
+						end)
+					end
+				end
+			end
+		end
+	end
+end
+
+
+state:GetPropertyChangedSignal("Value"):Connect(function()
+	if previousState == "Lobby" and state.Value == "Customization" then
+		print("[DEBUG] State changed to Customization, auto-selecting AssaultRifle")
+		task.defer(function()
+			for _, category in ipairs(weaponTypes:GetChildren()) do
+				local frame = category:FindFirstChild("Frame")
+				if frame then
+					for _, gun in ipairs(frame:GetChildren()) do
+						if gun.Name == "AssaultRifle" and gun:FindFirstChild("Button") then
+							selectWeapon(gun)
+							return
+						end
+					end
+				end
+			end
+		end)
+	end
+	previousState = state.Value
+end)
+
+setupWeaponButtons()
+
+weaponTypes.Changed:Connect(function()
+	setupWeaponButtons()
+end)
+--[[
+local savefolder = player:WaitForChild("SaveFolder")
+savefolder.Changed:Connect(function()
+	local ownedguns = savefolder:WaitForChild("OwnedGuns")
+	for i,v in pairs(ownedguns:GetChildren()) do
+		if v.Value == "Owned" then
+			local gunInList = GunList[v.Name]
+			local Category = weaponTypes:FindFirstChild(gunInList.Type)
+			local Frame = Category.Frame
+			local gun = Frame:FindFirstChild(v.Name)
+			if gun and "Owned" then
+				GunTemplate.New()
+			end
+		end
+	end
+end)
+--]]
