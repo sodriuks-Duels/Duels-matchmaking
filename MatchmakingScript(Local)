@@ -1,0 +1,101 @@
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Player = Players.LocalPlayer
+local PlayerGui = Player:WaitForChild("PlayerGui")
+local CoreGUI = PlayerGui:WaitForChild("ScreenGui")
+
+local MatchmakingEvent = ReplicatedStorage:WaitForChild("MatchmakingRequest")
+local CancelMatchmakingEvent = ReplicatedStorage:WaitForChild("CancelMatchmakingRequest")
+
+local MatchMakingFrame = CoreGUI:WaitForChild("MatchMakingFrame")
+local SearchingFrame = CoreGUI:WaitForChild("SearchingForMatchFrame")
+local PlayButton = CoreGUI:WaitForChild("Button"):WaitForChild("PlayTextButton")
+local KickButton = SearchingFrame:WaitForChild("Leave"):WaitForChild("Kick"):WaitForChild("ImageButton")
+local TimerText = SearchingFrame:WaitForChild("Timer"):WaitForChild("Title")
+local Buttons = CoreGUI:WaitForChild("Buttons")
+local PlayerInvites = CoreGUI:WaitForChild("PartyInvites")
+local ExitFrame = CoreGUI:WaitForChild("ExitFrame")
+local Party = CoreGUI:WaitForChild("Party")
+local CurrencyFrame = CoreGUI:WaitForChild("CurrencyFrame")
+local Button = CoreGUI:WaitForChild("Button")
+CoreGUI.MatchMakingFrame.Visible = false
+-- State
+local isSearching = false
+local timerThread = nil
+print("working ")
+-- Timer function
+local function startTimer()
+	local seconds = 0
+	TimerText.Text = "00:00"
+
+	timerThread = task.spawn(function()
+		while isSearching do
+			local min = math.floor(seconds / 60)
+			local sec = seconds % 60
+			TimerText.Text = string.format("%02d:%02d", min, sec)
+			seconds += 1
+			task.wait(1)
+		end
+	end)
+end
+
+local function stopTimer()
+	isSearching = false
+	if timerThread then
+		task.cancel(timerThread)
+		timerThread = nil
+	end
+	TimerText.Text = ""
+end
+
+-- Toggle menu
+CoreGUI.Button.PlayTextButton.Activated:Connect(function()
+	MatchMakingFrame.Visible = true
+end)
+
+-- Hook all matchmaking mode buttons (e.g., "1v1", "2v2")
+for _, modeFrame in pairs(MatchMakingFrame:GetChildren()) do
+	if modeFrame:IsA("Frame") and modeFrame:FindFirstChild("Play2") then
+		modeFrame.Play2.Activated:Connect(function()
+			local selectedMode = modeFrame.Name
+
+			-- Start search
+			MatchmakingEvent:FireServer({ mode = selectedMode })
+			MatchMakingFrame.Visible = false
+			game.Lighting.ShopBluredBackground.Enabled = false
+			game.Lighting.BluredBackground.Enabled = false
+			SearchingFrame.Visible = true
+			Buttons.Visible = true
+			PlayerInvites.Visible = true
+			ExitFrame.Visible = true
+			Party.Visible = true
+			CurrencyFrame.Visible = true
+			Button.Visible = false
+			MatchMakingFrame.Visible = false
+			isSearching = true
+			startTimer()
+			SearchingFrame.Title.Title.Text = selectedMode
+
+			print("Searching for mode:", selectedMode)
+		end)
+	end
+end
+
+-- Cancel matchmaking
+KickButton.Activated:Connect(function()
+	if isSearching then
+		CancelMatchmakingEvent:FireServer()
+		stopTimer()
+		SearchingFrame.Visible = false
+		CoreGUI.Buttons.State.Value = "Customization"
+		CoreGUI.Buttons.Visible = true
+		CoreGUI.PlayerInvites.Visible = true
+		CoreGUI.ExitFrame.Visible = true
+		CoreGUI.Party.Visible = true
+		CoreGUI.CurrencyFrame.Visible = true
+		CoreGUI.Button.Visible = true
+		CoreGUI.MatchMakingFrame.Visible = false
+		print("Left matchmaking queue.")
+	end
+end)
